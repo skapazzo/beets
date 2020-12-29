@@ -173,6 +173,8 @@ New features:
 * :doc:`/plugins/replaygain` now does its analysis in parallel when using
   the ``command``, ``ffmpeg`` or ``bs1770gain`` backends.
   :bug:`3478`
+* :doc:`/plugins/replaygain`: add support for metaflac in command backend.
+  :bug:`1203`
 
 Fixes:
 
