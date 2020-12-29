@@ -651,16 +651,21 @@ class CommandBackend(Backend):
                            cmd)
                     )
         else:
-            # Check whether the program is in $PATH.
-            for cmd in ('mp3gain', 'aacgain'):
+            # Check whether the programs are in $PATH.
+            for cmd in ('mp3gain', 'aacgain', 'metaflac'):
                 try:
-                    call([cmd, '-v'])
-                    self.commands.append(cmd)
+                    if cmd == 'metaflac':
+                        call([cmd, '--version'])
+                        self.commands.append(cmd)
+                    else:
+                        call([cmd, '-v'])
+                        self.commands.append(cmd)
                 except OSError:
                     pass
         if not self.commands:
             raise FatalReplayGainError(
-                u'no replaygain command found: install mp3gain or aacgain'
+                u'no replaygain command found: install mp3gain, \
+                        aacgain or metaflac'
             )
 
         self.noclip = config['noclip'].get(bool)
@@ -696,6 +701,8 @@ class CommandBackend(Backend):
                 return True
             elif 'aacgain' in cmd and item.format in ('MP3', 'AAC'):
                 return True
+            elif 'metaflac' in cmd and item.format == 'FLAC':
+                return True
         return False
 
     def compute_gain(self, items, target_level, is_album):
@@ -712,35 +719,43 @@ class CommandBackend(Backend):
         """Compute ReplayGain values and return a list of results
         dictionaries as given by `parse_tool_output`.
         """
-        # Construct shell command. The "-o" option makes the output
+        # Construct shell command.
+        # - Metaflac has no special options.
+        # - For mp3gain and aacgain "-o" option makes the output
         # easily parseable (tab-delimited). "-s s" forces gain
         # recalculation even if tags are already present and disables
         # tag-writing; this turns the mp3gain/aacgain tool into a gain
         # calculator rather than a tag manipulator because we take care
         # of changing tags ourselves.
-        if items[0].format == 'AAC':
-            bin = next(c for c in self.commands if 'aacgain' in c)
+        if items[0].format == 'FLAC':
+            bin = next(c for c in self.commands if 'metaflac' in c)
+            cmd = [bin, '--scan-replay-gain']
+            output_style = 'metaflac'
         else:
-            bin = next(c for c in self.commands if ('aacgain' in c or
-                                                    'mp3gain' in c))
-        cmd = [bin, '-o', '-s', 's']
-        if self.noclip:
-            # Adjust to avoid clipping.
-            cmd = cmd + ['-k']
-        else:
-            # Disable clipping warning.
-            cmd = cmd + ['-c']
-        cmd = cmd + ['-d', str(int(target_level - 89))]
+            if items[0].format == 'AAC':
+                bin = next(c for c in self.commands if 'aacgain' in c)
+            else:
+                bin = next(c for c in self.commands if ('aacgain' in c or
+                                                        'mp3gain' in c))
+            cmd = [bin, '-o', '-s', 's']
+            if self.noclip:
+                # Adjust to avoid clipping.
+                cmd = cmd + ['-k']
+            else:
+                # Disable clipping warning.
+                cmd = cmd + ['-c']
+            cmd = cmd + ['-d', str(int(target_level - 89))]
+            output_style = 'mp3gain'
+        # Add paths of tracks.
         cmd = cmd + [syspath(i.path) for i in items]
-        output_style = 'mp3gain'
 
         self._log.debug(u'analyzing {0} files', len(items))
         self._log.debug(u"executing {0}", " ".join(map(displayable_path, cmd)))
         output = call(cmd).stdout
         self._log.debug(u'analysis finished')
-        return self.parse_tool_output(output,
-                                      len(items) + (1 if is_album else 0),
-                                      output_style)
+        num_lines = len(items) + \
+            (1 if is_album and output_style == 'mp3gain' else 0)
+        return self.parse_tool_output(output, num_lines, output_style)
 
     def parse_tool_output(self, text, num_lines, style='mp3gain'):
         """Given the output from an invocation of the replaygain tool,
@@ -763,6 +778,22 @@ class CommandBackend(Backend):
                     'mingain': int(parts[5]),
                 }
                 out.append(Gain(d['gain'], d['peak']))
+        elif style == 'metaflac':
+            for line in text.split(b'\n')[:num_lines]:
+                split = line.rpartition(b':')
+                parts = split[2].split(b' ')
+                d = {
+                    'file': split[0],
+                    'albumgain': float(parts[1]),
+                    'albumpeak': float(parts[2]),
+                    'gain': float(parts[3]),
+                    'peak': float(parts[4])
+                }
+                album = Gain(d['albumgain'], d['albumpeak'])
+                out.append(Gain(d['gain'], d['peak']))
+            # Detect if the parsing was done on an album or single track
+            if num_lines > 1:
+                out.append(album)
         return out
 
 
