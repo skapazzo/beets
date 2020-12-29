@@ -636,28 +636,29 @@ class CommandBackend(Backend):
     def __init__(self, config, log):
         super(CommandBackend, self).__init__(config, log)
         config.add({
-            'command': u"",
+            'command': [],
             'noclip': True,
         })
 
-        self.command = config["command"].as_str()
+        self.commands = config["command"].as_str_seq()
 
-        if self.command:
+        if self.commands:
             # Explicit executable path.
-            if not os.path.isfile(self.command):
-                raise FatalReplayGainError(
-                    u'replaygain command does not exist: {0}'.format(
-                        self.command)
-                )
+            for cmd in self.commands:
+                if not os.path.isfile(cmd):
+                    raise FatalReplayGainError(
+                        u'replaygain command does not exist: {0}'.format(
+                           cmd)
+                    )
         else:
             # Check whether the program is in $PATH.
             for cmd in ('mp3gain', 'aacgain'):
                 try:
                     call([cmd, '-v'])
-                    self.command = cmd
+                    self.commands.append(cmd)
                 except OSError:
                     pass
-        if not self.command:
+        if not self.commands:
             raise FatalReplayGainError(
                 u'no replaygain command found: install mp3gain or aacgain'
             )
@@ -690,11 +691,12 @@ class CommandBackend(Backend):
     def format_supported(self, item):
         """Checks whether the given item is supported by the selected tool.
         """
-        if 'mp3gain' in self.command and item.format != 'MP3':
-            return False
-        elif 'aacgain' in self.command and item.format not in ('MP3', 'AAC'):
-            return False
-        return True
+        for cmd in self.commands:
+            if 'mp3gain' in cmd and item.format == 'MP3':
+                return True
+            elif 'aacgain' in cmd and item.format in ('MP3', 'AAC'):
+                return True
+        return False
 
     def compute_gain(self, items, target_level, is_album):
         """Computes the track or album gain of a list of items, returns
@@ -716,7 +718,12 @@ class CommandBackend(Backend):
         # tag-writing; this turns the mp3gain/aacgain tool into a gain
         # calculator rather than a tag manipulator because we take care
         # of changing tags ourselves.
-        cmd = [self.command, '-o', '-s', 's']
+        if items[0].format == 'AAC':
+            bin = next(c for c in self.commands if 'aacgain' in c)
+        else:
+            bin = next(c for c in self.commands if ('aacgain' in c or
+                                                    'mp3gain' in c))
+        cmd = [bin, '-o', '-s', 's']
         if self.noclip:
             # Adjust to avoid clipping.
             cmd = cmd + ['-k']
@@ -725,35 +732,37 @@ class CommandBackend(Backend):
             cmd = cmd + ['-c']
         cmd = cmd + ['-d', str(int(target_level - 89))]
         cmd = cmd + [syspath(i.path) for i in items]
+        output_style = 'mp3gain'
 
         self._log.debug(u'analyzing {0} files', len(items))
         self._log.debug(u"executing {0}", " ".join(map(displayable_path, cmd)))
         output = call(cmd).stdout
         self._log.debug(u'analysis finished')
         return self.parse_tool_output(output,
-                                      len(items) + (1 if is_album else 0))
+                                      len(items) + (1 if is_album else 0),
+                                      output_style)
 
-    def parse_tool_output(self, text, num_lines):
-        """Given the tab-delimited output from an invocation of mp3gain
-        or aacgain, parse the text and return a list of dictionaries
-        containing information about each analyzed file.
+    def parse_tool_output(self, text, num_lines, style='mp3gain'):
+        """Given the output from an invocation of the replaygain tool,
+        parse the text according to the tool's style and return a list
+        of dictionaries containing information about each analyzed file.
         """
         out = []
-        for line in text.split(b'\n')[1:num_lines + 1]:
-            parts = line.split(b'\t')
-            if len(parts) != 6 or parts[0] == b'File':
-                self._log.debug(u'bad tool output: {0}', text)
-                raise ReplayGainError(u'mp3gain failed')
-            d = {
-                'file': parts[0],
-                'mp3gain': int(parts[1]),
-                'gain': float(parts[2]),
-                'peak': float(parts[3]) / (1 << 15),
-                'maxgain': int(parts[4]),
-                'mingain': int(parts[5]),
-
-            }
-            out.append(Gain(d['gain'], d['peak']))
+        if style == 'mp3gain':
+            for line in text.split(b'\n')[1:num_lines + 1]:
+                parts = line.split(b'\t')
+                if len(parts) != 6 or parts[0] == b'File':
+                    self._log.debug(u'bad tool output: {0}', text)
+                    raise ReplayGainError(u'mp3gain failed')
+                d = {
+                    'file': parts[0],
+                    'mp3gain': int(parts[1]),
+                    'gain': float(parts[2]),
+                    'peak': float(parts[3]) / (1 << 15),
+                    'maxgain': int(parts[4]),
+                    'mingain': int(parts[5]),
+                }
+                out.append(Gain(d['gain'], d['peak']))
         return out
 
 
